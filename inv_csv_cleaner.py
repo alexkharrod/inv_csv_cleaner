@@ -5,6 +5,7 @@ import os
 import sys
 from datetime import datetime
 
+import numpy as np
 import pandas as pd
 
 # Configure logging
@@ -35,59 +36,116 @@ def clean_and_save_file(input_filename, output_folder):
         df = pd.read_csv(
             input_filename,
             encoding="cp1252",
-            header=0,  # Changed from header=1 as requested
+            header=0,
             quoting=csv.QUOTE_ALL,
         )
         logger.info(f"Successfully read CSV with {len(df)} rows")
 
-        # Set the first unnamed column as index
-        df.set_index(df.columns[0], inplace=True)
+        # Make a copy of the first column to use as index
+        # This avoids any issues with in-place modifications
+        sku_column = df.iloc[:, 0].copy()
+
+        # Convert to string safely
+        sku_column = sku_column.astype(str)
+
+        # Remove quotes safely
+        sku_column = sku_column.str.replace('"', "", regex=False)
+
+        # Set as index
+        df = df.iloc[:, 1:]  # Remove the first column
+        df.index = sku_column
         df.index.name = "SKU"
+
+        # Clean column names (remove quotes)
+        df.columns = [str(col).replace('"', "") for col in df.columns]
+
         logger.info("Set SKU index successfully")
 
-        # Remove quotes from all string values
-        df.index = df.index.str.replace('"', "")
-        for col in df.columns:
-            if df[col].dtype == "object":
-                df[col] = df[col].str.replace('"', "")
-        logger.info("Removed quotes from all fields")
+        # List of categories to filter out
+        categories = [
+            "Uncategorized",
+            "Inventory",
+            "Total Inventory",
+            "Total Uncategorized",
+            "TOTAL",
+            "Core Stock - ATL",
+            "Total Core Stock - ATL",
+            "Total Core Stock - ATL\\",
+            "Core Stock - ATL\\",
+            "Core Stock - ATL, AMS",
+            "Total Core Stock - ATL, AMS",
+        ]
 
-        # Create masks for filtering
-        category_mask = (
-            (df.index == "Uncategorized")
-            | (df.index == "Inventory")
-            | (df.index == "Total Inventory")
-            | (df.index == "Total Uncategorized")
-            | (df.index == "TOTAL")
-        )
+        # Create simple filter lists for safety
+        to_keep = []
+        for idx in df.index:
+            idx_str = str(idx)
 
-        number_mask = df.index.str.match(r"^(14|16|20|21|70)-")
+            # Check if it's a category to filter out
+            if idx_str in categories:
+                continue
 
-        prefix_mask = (
-            df.index.str.startswith("BSBI-")
-            | df.index.str.startswith("Seneca-")
-            | df.index.str.startswith("BF")
-            | df.index.str.startswith("OptConnect-")
-        )
+            # Check if it matches number patterns
+            if idx_str.startswith(
+                (
+                    "14-",
+                    "16-",
+                    "20-",
+                    "21-",
+                    "70-",
+                    "00-",
+                    "14.",
+                    "320-",
+                    "IP15L",
+                    "IP19L",
+                    "Chrome-",
+                    "Customs-",
+                    "LGE-",
+                    "OF15L",
+                    "R15L",
+                    "RM12L",
+                    "W24L",
+                    "VGL",
+                )
+            ):
+                continue
 
-        # Apply all filters
+            # Check prefixes
+            if idx_str.startswith(
+                (
+                    "BSBI-",
+                    "Seneca-",
+                    "BF",
+                    "OptConnect-",
+                    "BrightSign-",
+                    "Chrome-",
+                    "Customs-",
+                    "IP15L",
+                    "IP19L",
+                )
+            ):
+                continue
+
+            # Otherwise keep it
+            to_keep.append(idx)
+
+        # Filter the dataframe
         original_count = len(df)
-        df = df[~(category_mask | number_mask | prefix_mask)]
+        df = df.loc[to_keep]
         filtered_count = original_count - len(df)
         logger.info(f"Filtered out {filtered_count} rows")
 
-        # Split SKUs at parentheses
-        df.index = pd.Index([x.split(" (")[0] for x in df.index])
-        logger.info("Cleaned SKU formats")
+        # Process SKU format safely
+        new_index = []
+        for idx in df.index:
+            idx_str = str(idx)
+            if " (" in idx_str:
+                new_index.append(idx_str.split(" (")[0])
+            else:
+                new_index.append(idx_str)
 
-        # Ensure numeric columns are properly formatted
-        numeric_columns = [
-            col
-            for col in df.columns
-            if any(x in col.lower() for x in ["days", "current", "total"])
-        ]
-        for col in numeric_columns:
-            df[col] = pd.to_numeric(df[col], errors="coerce")
+        df.index = new_index
+        logger.info("Cleaned SKU formats")
 
         # Create output path
         input_basename = os.path.basename(input_filename)
@@ -100,19 +158,11 @@ def clean_and_save_file(input_filename, output_folder):
 
         # Save the cleaned file
         df.to_csv(
-            new_filename, quoting=csv.QUOTE_NONE, escapechar="\\", encoding="utf-8"
+            new_filename,
+            quoting=csv.QUOTE_MINIMAL,  # Changed to MINIMAL for safety
+            encoding="utf-8",
         )
         logger.info("File saved successfully")
-
-        # Log summary statistics
-        if "TOTAL" in df.columns:
-            logger.info(f"Summary Statistics:")
-            logger.info(f"Total SKUs processed: {len(df)}")
-            logger.info(f"Total inventory value: {df['TOTAL'].sum():,.2f}")
-            if "Average Days in Stock" in df.columns:
-                logger.info(
-                    f"Average days in stock: {df['Average Days in Stock'].mean():.1f}"
-                )
 
         return True
 
